@@ -1,17 +1,19 @@
 # app/routes.py
 
-from flask import current_app, render_template, request, jsonify
+from flask import current_app, request, jsonify
 import pandas as pd
 import concurrent.futures
 from .ml_logic import get_model_prediction, fetch_yfinance_data
 from .helpers import calculate_stop_loss_value, get_latest_price, get_technical_indicators
 
 @current_app.route('/')
-def index():
-    """Main page route with template variables."""
-    return render_template('index.html', 
-                         asset_classes=current_app.config.get('ASSET_CLASSES', {}),
-                         timeframes=current_app.config.get('TIMEFRAMES', {}))
+def api_root():
+    """Root endpoint for the API, providing a welcome message and status."""
+    return jsonify({
+        "message": "Welcome to the ML Trading Signal API",
+        "status": "ok",
+        "documentation": "Please see the frontend client for usage."
+    })
 
 @current_app.route('/api/check_model_status')
 def check_model_status():
