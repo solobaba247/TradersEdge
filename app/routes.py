@@ -3,6 +3,7 @@
 from flask import current_app, request, jsonify
 import pandas as pd
 import concurrent.futures
+import time
 from .ml_logic import get_model_prediction, fetch_yfinance_data
 from .helpers import calculate_stop_loss_value, get_latest_price, get_technical_indicators
 
@@ -14,6 +15,11 @@ def api_root():
         "status": "ok",
         "documentation": "Please see the frontend client for usage."
     })
+
+@current_app.route('/api/health')
+def health_check():
+    """Simple health check endpoint."""
+    return jsonify({"status": "healthy", "timestamp": time.time()}), 200
 
 @current_app.route('/api/check_model_status')
 def check_model_status():
@@ -86,11 +92,21 @@ def generate_signal_route():
 def get_prediction_for_symbol_sync(symbol, timeframe, model, scaler, feature_columns):
     """Synchronous version of prediction function for concurrent execution."""
     try:
+        # Shorter timeout for individual symbol processing
+        start_time = time.time()
+        
         data = fetch_yfinance_data(symbol, period='90d', interval=timeframe)
-        if data is None or len(data) < 50: return None
+        if data is None or len(data) < 50: 
+            return None
+        
+        # Check if we're running out of time
+        if time.time() - start_time > 25:  # 25 second timeout per symbol
+            print(f"⏰ Symbol {symbol} taking too long, skipping...")
+            return None
         
         prediction = get_model_prediction(data, model, scaler, feature_columns)
-        if "error" in prediction or prediction['signal'] == "HOLD": return None
+        if "error" in prediction or prediction['signal'] == "HOLD": 
+            return None
         
         signal, confidence, latest_price = prediction['signal'], prediction['confidence'], prediction['latest_price']
         
@@ -127,27 +143,43 @@ def scan_market_route():
         
         symbols_to_scan = asset_classes[asset_type]
         
+        # Limit symbols to prevent timeouts on free tier
+        max_symbols = 15  # Reduced from full list
+        if len(symbols_to_scan) > max_symbols:
+            symbols_to_scan = symbols_to_scan[:max_symbols]
+            print(f"⚠️ Limiting scan to first {max_symbols} symbols to prevent timeout")
+        
         results = []
-        # Reduced max_workers to 3 to avoid overwhelming free-tier resources and causing timeouts.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        # Use only 2 workers to reduce resource usage
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_symbol = {
                 executor.submit(get_prediction_for_symbol_sync, symbol, timeframe, current_app.model, current_app.scaler, current_app.feature_columns): symbol for symbol in symbols_to_scan
             }
-            for future in concurrent.futures.as_completed(future_to_symbol):
+            
+            completed_count = 0
+            for future in concurrent.futures.as_completed(future_to_symbol, timeout=90):  # 90 second total timeout
                 symbol_name = future_to_symbol[future]
                 try:
-                    # Increased timeout to 60s per symbol to allow for slow API responses.
-                    # This must be less than the main Gunicorn timeout (which should be set to 120s).
-                    result = future.result(timeout=60)
-                    if result is not None: results.append(result)
+                    result = future.result(timeout=30)  # 30 second timeout per symbol
+                    if result is not None: 
+                        results.append(result)
+                    completed_count += 1
+                    
+                    # Progress logging
+                    if completed_count % 5 == 0:
+                        print(f"📊 Processed {completed_count}/{len(symbols_to_scan)} symbols")
+                        
                 except concurrent.futures.TimeoutError:
-                    print(f"⏰ Timeout processing {symbol_name} after 60 seconds. Skipping.")
+                    print(f"⏰ Timeout processing {symbol_name} after 30 seconds. Skipping.")
                 except Exception as e:
                     print(f"Error processing {symbol_name}: {e}")
                     continue
         
+        print(f"✅ Market scan completed: {len(results)} signals found from {len(symbols_to_scan)} symbols")
         return jsonify(results)
+        
     except Exception as e:
+        print(f"🔥 Market scan failed: {e}")
         return jsonify({"error": f"Failed to scan market: {str(e)}"}), 500
 
 @current_app.route('/api/latest_price')
