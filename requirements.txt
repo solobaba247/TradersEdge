@@ -1,5 +1,4 @@
 # requirements.txt
-wheel
 flask==2.3.3
 pandas==2.1.4
 numpy==1.26.2
