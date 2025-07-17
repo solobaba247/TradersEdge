@@ -5,6 +5,7 @@ import numpy as np
 import requests
 import pandas_ta as ta
 import warnings
+from datetime import datetime
 
 warnings.filterwarnings('ignore')
 
@@ -40,7 +41,7 @@ def fetch_yfinance_data(symbol, period='90d', interval='1h'):
     url = f"{BASE_URL}{endpoint}"
 
     try:
-        response = requests.get(url, params=params, timeout=45)
+        response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
         
         data = response.json()
@@ -59,16 +60,35 @@ def fetch_yfinance_data(symbol, period='90d', interval='1h'):
             print(f"   ⚠️ API returned no data for {symbol}")
             return None
             
-        # --- Data Cleaning and Standardization ---
+        # --- Fixed Date Parsing ---
         date_col_found = False
         for col_name in ['date', 'Date', 'datetime', 'Datetime', 'timestamp', 'Timestamp']:
             if col_name in df.columns:
-                # --- FINAL FIX: Added format='mixed' to handle inconsistent date strings from the API ---
-                df[col_name] = pd.to_datetime(df[col_name], format='mixed', utc=True)
-                df = df.set_index(col_name)
-                df.index.name = 'Datetime'
-                date_col_found = True
-                break
+                try:
+                    # Try multiple parsing methods to handle different formats
+                    df[col_name] = pd.to_datetime(df[col_name], utc=True, errors='coerce')
+                    
+                    # If coerce failed, try infer_datetime_format
+                    if df[col_name].isna().all():
+                        df[col_name] = pd.to_datetime(df[col_name], infer_datetime_format=True, utc=True, errors='coerce')
+                    
+                    # Final fallback - try without UTC
+                    if df[col_name].isna().all():
+                        df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
+                        if not df[col_name].isna().all():
+                            df[col_name] = df[col_name].dt.tz_localize('UTC')
+                    
+                    # Remove any rows where date parsing failed
+                    df = df.dropna(subset=[col_name])
+                    
+                    if not df.empty:
+                        df = df.set_index(col_name)
+                        df.index.name = 'Datetime'
+                        date_col_found = True
+                        break
+                except Exception as e:
+                    print(f"   ⚠️ Error parsing dates for {symbol}: {e}")
+                    continue
         
         if not date_col_found:
             print(f"   ⚠️ No recognizable date/time column found for {symbol}. Cannot process.")
@@ -90,6 +110,14 @@ def fetch_yfinance_data(symbol, period='90d', interval='1h'):
             df = df.drop('Adj Close', axis=1)
         
         df = df[required_cols].dropna()
+        
+        # Convert data types explicitly
+        for col in ['Open', 'High', 'Low', 'Close']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
+        
+        # Remove any rows with invalid numeric data
+        df = df.dropna()
         
         if not df.empty:
             print(f"   ✅ Success with API for {symbol}! Got {len(df)} rows")
@@ -151,6 +179,7 @@ def create_features_for_prediction(data, feature_columns_list):
             if col not in df.columns:
                 df[col] = 0.0
         
+        # Use newer fillna syntax
         df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
         
         required_cols = feature_columns_list + ['Close']
