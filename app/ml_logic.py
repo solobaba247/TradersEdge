@@ -1,4 +1,4 @@
-# app/ml_logic.py
+# app/ml_logic.py - FIXED VERSION (Recursion Issue Resolved)
 
 import pandas as pd
 import numpy as np
@@ -44,23 +44,37 @@ def get_fmp_period_days(period):
     }
     return period_map.get(period, 90)
 
-def fetch_fmp_stock_data(symbol, period='90d', interval='1h'):
-    """Fetch stock data from Financial Modeling Prep API."""
-    print(f"--- Fetching stock data for {symbol} from FMP ---")
+def fetch_fmp_data_unified(symbol, period='90d', interval='1h'):
+    """
+    UNIFIED FMP data fetching function to prevent recursion.
+    This replaces all the individual fetch functions.
+    """
+    print(f"--- Fetching data for {symbol} from FMP ---")
+    
+    # Determine symbol format based on asset type
+    api_symbol = symbol
+    
+    if symbol.endswith('=X'):
+        # Forex: Convert EURUSD=X -> EUR/USD
+        base_quote = symbol.replace('=X', '')
+        if len(base_quote) == 6:
+            api_symbol = f"{base_quote[:3]}/{base_quote[3:]}"
+    elif '-USD' in symbol:
+        # Crypto: Convert BTC-USD -> BTCUSD
+        api_symbol = symbol.replace('-USD', 'USD')
+    # Stocks and indices use symbol as-is
     
     fmp_interval = get_fmp_interval_mapping(interval)
     days = get_fmp_period_days(period)
     
-    # Calculate from and to dates
+    # Calculate date range
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
-    
-    # Format dates for API
     from_date = start_date.strftime('%Y-%m-%d')
     to_date = end_date.strftime('%Y-%m-%d')
     
-    # Build URL for historical chart data
-    url = f"{FMP_BASE_URL}/historical-chart/{fmp_interval}/{symbol}"
+    # Build FMP API URL
+    url = f"{FMP_BASE_URL}/historical-chart/{fmp_interval}/{api_symbol}"
     params = {
         'from': from_date,
         'to': to_date,
@@ -68,28 +82,34 @@ def fetch_fmp_stock_data(symbol, period='90d', interval='1h'):
     }
     
     try:
+        print(f"   Requesting: {url}")
+        print(f"   Params: {params}")
+        
         response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
         
         data = response.json()
         
         if not data or not isinstance(data, list):
-            print(f"   ⚠️ FMP returned no data for {symbol}")
+            print(f"   ⚠️ FMP returned no data for {api_symbol}")
             return None
+        
+        print(f"   📊 FMP returned {len(data)} data points")
         
         # Convert to DataFrame
         df = pd.DataFrame(data)
         
-        # FMP returns data with 'date' column in format '2024-01-01 09:30:00'
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'], utc=True)
-            df = df.set_index('date')
-            df = df.sort_index()  # Ensure chronological order
-        else:
-            print(f"   ⚠️ No date column found in FMP response for {symbol}")
+        # Check if we have the date column
+        if 'date' not in df.columns:
+            print(f"   ❌ No 'date' column found. Available columns: {list(df.columns)}")
             return None
         
-        # Standardize column names to match your existing code
+        # Parse dates and set as index
+        df['date'] = pd.to_datetime(df['date'], utc=True)
+        df = df.set_index('date')
+        df = df.sort_index()  # Ensure chronological order
+        
+        # Standardize column names
         column_mapping = {
             'open': 'Open',
             'high': 'High', 
@@ -100,28 +120,38 @@ def fetch_fmp_stock_data(symbol, period='90d', interval='1h'):
         
         df = df.rename(columns=column_mapping)
         
-        # Ensure we have required columns
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        missing_cols = [col for col in required_cols if col not in df.columns]
+        # Ensure we have required OHLC columns
+        required_ohlc = ['Open', 'High', 'Low', 'Close']
+        missing_cols = [col for col in required_ohlc if col not in df.columns]
         
         if missing_cols:
-            print(f"   ⚠️ Missing columns {missing_cols} for {symbol}")
+            print(f"   ❌ Missing OHLC columns: {missing_cols}")
             return None
+        
+        # Handle Volume column (might not exist for forex/indices)
+        if 'Volume' not in df.columns:
+            print(f"   📊 No volume data, using dummy volume")
+            df['Volume'] = 1000000  # Dummy volume
         
         # Convert to numeric and clean data
-        for col in ['Open', 'High', 'Low', 'Close']:
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-        df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
         
-        # Remove rows with NaN values
-        df = df.dropna()
+        # Remove rows with NaN values in OHLC
+        df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
         
         if df.empty:
-            print(f"   ⚠️ No valid data after cleaning for {symbol}")
+            print(f"   ⚠️ No valid data after cleaning for {api_symbol}")
             return None
         
-        print(f"   ✅ Success with FMP for {symbol}! Got {len(df)} rows")
-        return df[required_cols]
+        # Final validation
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        result_df = df[required_cols]
+        
+        print(f"   ✅ Success! Got {len(result_df)} clean rows for {symbol}")
+        print(f"   📈 Price range: {result_df['Close'].min():.4f} - {result_df['Close'].max():.4f}")
+        
+        return result_df
         
     except requests.exceptions.RequestException as e:
         print(f"   ❌ FMP API request failed for {symbol}: {e}")
@@ -130,289 +160,13 @@ def fetch_fmp_stock_data(symbol, period='90d', interval='1h'):
         print(f"   ❌ Error processing FMP data for {symbol}: {e}")
         return None
 
-def fetch_fmp_forex_data(symbol, period='90d', interval='1h'):
-    """Fetch forex data from Financial Modeling Prep API."""
-    print(f"--- Fetching forex data for {symbol} from FMP ---")
-    
-    # Convert symbol format (EURUSD=X -> EUR/USD)
-    if symbol.endswith('=X'):
-        # Remove =X and format as XXX/YYY
-        base_quote = symbol.replace('=X', '')
-        if len(base_quote) == 6:
-            forex_pair = f"{base_quote[:3]}/{base_quote[3:]}"
-        else:
-            forex_pair = base_quote
-    else:
-        forex_pair = symbol
-    
-    fmp_interval = get_fmp_interval_mapping(interval)
-    days = get_fmp_period_days(period)
-    
-    # Calculate dates
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
-    from_date = start_date.strftime('%Y-%m-%d')
-    to_date = end_date.strftime('%Y-%m-%d')
-    
-    # FMP Forex endpoint
-    url = f"{FMP_BASE_URL}/historical-chart/{fmp_interval}/{forex_pair}"
-    params = {
-        'from': from_date,
-        'to': to_date,
-        'apikey': FMP_API_KEY
-    }
-    
-    try:
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        if not data or not isinstance(data, list):
-            print(f"   ⚠️ FMP returned no forex data for {forex_pair}")
-            return None
-        
-        df = pd.DataFrame(data)
-        
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'], utc=True)
-            df = df.set_index('date')
-            df = df.sort_index()
-        else:
-            print(f"   ⚠️ No date column in forex response for {forex_pair}")
-            return None
-        
-        # Standardize columns
-        column_mapping = {
-            'open': 'Open',
-            'high': 'High',
-            'low': 'Low', 
-            'close': 'Close',
-            'volume': 'Volume'
-        }
-        
-        df = df.rename(columns=column_mapping)
-        
-        # For forex, volume might not be available, so we'll create dummy volume
-        if 'Volume' not in df.columns:
-            df['Volume'] = 1000000  # Dummy volume for forex
-        
-        # Ensure required columns
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        for col in required_cols[:4]:  # OHLC
-            if col not in df.columns:
-                print(f"   ⚠️ Missing {col} column for {forex_pair}")
-                return None
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
-        df = df.dropna()
-        
-        if df.empty:
-            print(f"   ⚠️ No valid forex data after cleaning for {forex_pair}")
-            return None
-        
-        print(f"   ✅ Success with FMP forex for {forex_pair}! Got {len(df)} rows")
-        return df[required_cols]
-        
-    except Exception as e:
-        print(f"   ❌ Error fetching FMP forex data for {forex_pair}: {e}")
-        return None
-
-def fetch_fmp_crypto_data(symbol, period='90d', interval='1h'):
-    """Fetch cryptocurrency data from Financial Modeling Prep API."""
-    print(f"--- Fetching crypto data for {symbol} from FMP ---")
-    
-    # Convert symbol format (BTC-USD -> BTCUSD)
-    if '-USD' in symbol:
-        crypto_symbol = symbol.replace('-USD', 'USD')
-    else:
-        crypto_symbol = symbol
-    
-    fmp_interval = get_fmp_interval_mapping(interval)
-    days = get_fmp_period_days(period)
-    
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
-    from_date = start_date.strftime('%Y-%m-%d')
-    to_date = end_date.strftime('%Y-%m-%d')
-    
-    # FMP Crypto endpoint
-    url = f"{FMP_BASE_URL}/historical-chart/{fmp_interval}/{crypto_symbol}"
-    params = {
-        'from': from_date,
-        'to': to_date,
-        'apikey': FMP_API_KEY
-    }
-    
-    try:
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        if not data or not isinstance(data, list):
-            print(f"   ⚠️ FMP returned no crypto data for {crypto_symbol}")
-            return None
-        
-        df = pd.DataFrame(data)
-        
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'], utc=True)
-            df = df.set_index('date')
-            df = df.sort_index()
-        else:
-            print(f"   ⚠️ No date column in crypto response for {crypto_symbol}")
-            return None
-        
-        # Standardize columns
-        column_mapping = {
-            'open': 'Open',
-            'high': 'High',
-            'low': 'Low',
-            'close': 'Close', 
-            'volume': 'Volume'
-        }
-        
-        df = df.rename(columns=column_mapping)
-        
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        for col in required_cols:
-            if col not in df.columns:
-                if col == 'Volume':
-                    df[col] = 1000000  # Dummy volume if not available
-                else:
-                    print(f"   ⚠️ Missing {col} column for {crypto_symbol}")
-                    return None
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        df = df.dropna()
-        
-        if df.empty:
-            print(f"   ⚠️ No valid crypto data after cleaning for {crypto_symbol}")
-            return None
-        
-        print(f"   ✅ Success with FMP crypto for {crypto_symbol}! Got {len(df)} rows")
-        return df[required_cols]
-        
-    except Exception as e:
-        print(f"   ❌ Error fetching FMP crypto data for {crypto_symbol}: {e}")
-        return None
-
-def fetch_fmp_index_data(symbol, period='90d', interval='1h'):
-    """Fetch index data from Financial Modeling Prep API."""
-    print(f"--- Fetching index data for {symbol} from FMP ---")
-    
-    # Convert symbol format (^GSPC -> ^GSPC or map to FMP equivalent)
-    index_symbol_map = {
-        '^GSPC': '^GSPC',  # S&P 500
-        '^DJI': '^DJI',    # Dow Jones
-        '^IXIC': '^IXIC',  # NASDAQ
-        '^RUT': '^RUT',    # Russell 2000
-        '^VIX': '^VIX',    # VIX
-        '^TNX': '^TNX',    # 10-Year Treasury
-        '^FTSE': '^FTSE',  # FTSE 100
-        '^GDAXI': '^GDAXI', # DAX
-        '^FCHI': '^FCHI',  # CAC 40
-        '^N225': '^N225',  # Nikkei 225
-        '^HSI': '^HSI'     # Hang Seng
-    }
-    
-    fmp_symbol = index_symbol_map.get(symbol, symbol)
-    
-    fmp_interval = get_fmp_interval_mapping(interval)
-    days = get_fmp_period_days(period)
-    
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
-    from_date = start_date.strftime('%Y-%m-%d')
-    to_date = end_date.strftime('%Y-%m-%d')
-    
-    url = f"{FMP_BASE_URL}/historical-chart/{fmp_interval}/{fmp_symbol}"
-    params = {
-        'from': from_date,
-        'to': to_date,
-        'apikey': FMP_API_KEY
-    }
-    
-    try:
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        if not data or not isinstance(data, list):
-            print(f"   ⚠️ FMP returned no index data for {fmp_symbol}")
-            return None
-        
-        df = pd.DataFrame(data)
-        
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'], utc=True)
-            df = df.set_index('date')
-            df = df.sort_index()
-        else:
-            print(f"   ⚠️ No date column in index response for {fmp_symbol}")
-            return None
-        
-        # Standardize columns
-        column_mapping = {
-            'open': 'Open',
-            'high': 'High',
-            'low': 'Low',
-            'close': 'Close',
-            'volume': 'Volume'
-        }
-        
-        df = df.rename(columns=column_mapping)
-        
-        # For indices, volume might not be meaningful, create dummy volume
-        if 'Volume' not in df.columns:
-            df['Volume'] = 1000000
-        
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        for col in required_cols[:4]:  # OHLC
-            if col not in df.columns:
-                print(f"   ⚠️ Missing {col} column for {fmp_symbol}")
-                return None
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
-        df = df.dropna()
-        
-        if df.empty:
-            print(f"   ⚠️ No valid index data after cleaning for {fmp_symbol}")
-            return None
-        
-        print(f"   ✅ Success with FMP index for {fmp_symbol}! Got {len(df)} rows")
-        return df[required_cols]
-        
-    except Exception as e:
-        print(f"   ❌ Error fetching FMP index data for {fmp_symbol}: {e}")
-        return None
-
+# CRITICAL FIX: Replace the recursive function with direct call
 def fetch_yfinance_data(symbol, period='90d', interval='1h'):
-    """Main function to fetch data from Financial Modeling Prep API based on symbol type."""
-    print(f"--- Starting FMP fetch for {symbol} ---")
-    
-    try:
-        # Determine asset type and route to appropriate function
-        if "=X" in symbol:
-            # Forex pair
-            return fetch_fmp_forex_data(symbol, period, interval)
-        elif "-USD" in symbol:
-            # Cryptocurrency
-            return fetch_fmp_crypto_data(symbol, period, interval)
-        elif symbol.startswith('^'):
-            # Index
-            return fetch_fmp_index_data(symbol, period, interval)
-        else:
-            # Stock
-            return fetch_fmp_stock_data(symbol, period, interval)
-            
-    except Exception as e:
-        print(f"   ❌ Error in main fetch function for {symbol}: {e}")
-        return None
+    """
+    Main data fetching function - FIXED to prevent recursion.
+    This is the function called by your routes.
+    """
+    return fetch_fmp_data_unified(symbol, period, interval)
 
 def create_features_for_prediction(data, feature_columns_list):
     """Creates all necessary features for the model from raw price data."""
@@ -460,8 +214,8 @@ def create_features_for_prediction(data, feature_columns_list):
             if col not in df.columns:
                 df[col] = 0.0
         
-        # Use newer fillna syntax
-        df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        # Handle NaN values properly for newer pandas versions
+        df = df.ffill().bfill().fillna(0)
         
         required_cols = feature_columns_list + ['Close']
         available_cols = [col for col in required_cols if col in df.columns]
