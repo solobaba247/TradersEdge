@@ -1,4 +1,4 @@
-# app/ml_logic.py - MINIMAL VERSION WITHOUT PANDAS-TA
+# app/ml_logic.py - DIAGNOSTIC VERSION TO DEBUG FMP DATA ISSUES
 
 import pandas as pd
 import numpy as np
@@ -52,9 +52,10 @@ def calculate_atr_manual(high, low, close, window=14):
 
 def fetch_yfinance_data(symbol, period='90d', interval='1h'):
     """
-    ULTRA-MINIMAL FMP DATA FETCHING - NO EXTERNAL LIBS
+    DIAGNOSTIC VERSION - Enhanced logging to debug FMP data issues
     """
-    print(f"=== MINIMAL FMP FETCH for {symbol} ===")
+    print(f"🔍 === DIAGNOSTIC FMP FETCH for {symbol} ===")
+    print(f"🔍 Original request: period={period}, interval={interval}")
     
     # Convert symbol format
     api_symbol = symbol
@@ -65,51 +66,106 @@ def fetch_yfinance_data(symbol, period='90d', interval='1h'):
     elif '-USD' in symbol:
         api_symbol = symbol.replace('-USD', 'USD')
     
-    # Map intervals
-    interval_map = {'1m': '1min', '5m': '5min', '15m': '15min', '30m': '30min', 
-                   '1h': '1hour', '4h': '4hour', '1d': '1day', '1wk': '1week'}
+    print(f"🔍 Symbol conversion: {symbol} -> {api_symbol}")
+    
+    # Map intervals with more options
+    interval_map = {
+        '1m': '1min', '5m': '5min', '15m': '15min', '30m': '30min', 
+        '1h': '1hour', '4h': '4hour', '1d': '1day', '1wk': '1week'
+    }
     fmp_interval = interval_map.get(interval, '1hour')
+    print(f"🔍 Interval mapping: {interval} -> {fmp_interval}")
     
-    # Calculate days
-    period_map = {'1d': 1, '5d': 5, '1mo': 30, '3mo': 90, '6mo': 180, 
-                  '1y': 365, '90d': 90}
-    days = period_map.get(period, 90)
+    # Try different period strategies for more data
+    if period == '90d':
+        # For 90 days, try getting more data by extending the period
+        days = 180  # Get 6 months of data instead
+        print(f"🔍 Extended period: 90d -> 180 days for more data points")
+    else:
+        period_map = {'1d': 7, '5d': 14, '1mo': 60, '3mo': 120, '6mo': 240, 
+                      '1y': 365, '2y': 730}
+        days = period_map.get(period, 180)
+        print(f"🔍 Period mapping: {period} -> {days} days")
     
-    # Date range
+    # Date range calculation
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
     from_date = start_date.strftime('%Y-%m-%d')
     to_date = end_date.strftime('%Y-%m-%d')
     
-    # API request
+    print(f"🔍 Date range: {from_date} to {to_date} ({days} days)")
+    
+    # Build API request
     url = f"{FMP_BASE_URL}/historical-chart/{fmp_interval}/{api_symbol}"
     params = {'from': from_date, 'to': to_date, 'apikey': FMP_API_KEY}
     
-    print(f"   URL: {url}")
-    print(f"   Symbol: {symbol} -> {api_symbol}")
+    print(f"🔍 Full URL: {url}")
+    print(f"🔍 Params: {params}")
     
     try:
-        print(f"   Making HTTP request...")
+        print(f"🔍 Making HTTP request...")
         response = requests.get(url, params=params, timeout=30)
-        print(f"   Response status: {response.status_code}")
+        print(f"🔍 Response status: {response.status_code}")
+        print(f"🔍 Response headers: {dict(response.headers)}")
         
         if response.status_code != 200:
-            print(f"   ❌ HTTP Error: {response.status_code}")
+            print(f"❌ HTTP Error {response.status_code}")
+            print(f"❌ Response text: {response.text}")
             return None
         
-        data = response.json()
-        print(f"   Got response type: {type(data)}")
+        # Check response size
+        response_text = response.text
+        print(f"🔍 Response size: {len(response_text)} characters")
         
-        if not data or not isinstance(data, list):
-            print(f"   ❌ Invalid response format")
+        try:
+            data = response.json()
+        except ValueError as e:
+            print(f"❌ JSON parsing failed: {e}")
+            print(f"❌ Response preview: {response_text[:500]}...")
             return None
         
-        print(f"   📊 Processing {len(data)} data points...")
+        print(f"🔍 JSON parsed successfully")
+        print(f"🔍 Response type: {type(data)}")
         
-        # Create DataFrame step by step to avoid recursion
+        if isinstance(data, dict):
+            print(f"🔍 Response is dict with keys: {list(data.keys())}")
+            # Check if it's an error response
+            if 'error' in data or 'Error Message' in data:
+                print(f"❌ API Error: {data}")
+                return None
+        
+        if not data:
+            print(f"❌ Empty response from FMP API")
+            return None
+        
+        if not isinstance(data, list):
+            print(f"❌ Expected list, got {type(data)}")
+            print(f"❌ Data content: {str(data)[:200]}...")
+            return None
+        
+        print(f"🔍 Raw data points from FMP: {len(data)}")
+        
+        # Show first few data points for debugging
+        if len(data) > 0:
+            print(f"🔍 First data point: {data[0]}")
+            if len(data) > 1:
+                print(f"🔍 Last data point: {data[-1]}")
+        
+        # Process data with detailed logging
+        print(f"🔍 Processing data points...")
         records = []
-        for item in data:
+        for i, item in enumerate(data):
             try:
+                if not isinstance(item, dict):
+                    print(f"⚠️ Item {i} is not dict: {type(item)}")
+                    continue
+                
+                required_fields = ['date', 'open', 'high', 'low', 'close']
+                missing_fields = [field for field in required_fields if field not in item]
+                if missing_fields:
+                    print(f"⚠️ Item {i} missing fields: {missing_fields}")
+                    continue
+                
                 record = {
                     'date': item.get('date'),
                     'Open': float(item.get('open', 0)),
@@ -118,41 +174,79 @@ def fetch_yfinance_data(symbol, period='90d', interval='1h'):
                     'Close': float(item.get('close', 0)),
                     'Volume': float(item.get('volume', 1000000))
                 }
+                
+                # Validate numeric values
+                if any(val <= 0 for val in [record['Open'], record['High'], record['Low'], record['Close']]):
+                    print(f"⚠️ Item {i} has invalid prices: {record}")
+                    continue
+                
                 records.append(record)
-            except (ValueError, TypeError):
+                
+            except (ValueError, TypeError) as e:
+                print(f"⚠️ Error processing item {i}: {e}")
                 continue
         
+        print(f"🔍 Valid records after processing: {len(records)}")
+        
         if not records:
-            print(f"   ❌ No valid records after processing")
+            print(f"❌ No valid records after processing")
             return None
         
-        print(f"   📊 Created {len(records)} valid records")
-        
-        # Create DataFrame manually
+        # Create DataFrame
+        print(f"🔍 Creating DataFrame...")
         df = pd.DataFrame(records)
+        print(f"🔍 DataFrame shape before date processing: {df.shape}")
         
-        # Convert dates manually
-        print(f"   🕐 Converting dates...")
+        # Process dates
+        print(f"🔍 Processing dates...")
         df['date'] = pd.to_datetime(df['date'], utc=True, errors='coerce')
-        df = df.dropna(subset=['date'])
+        
+        # Check for NaT (Not a Time) values
+        nat_count = df['date'].isna().sum()
+        if nat_count > 0:
+            print(f"⚠️ Found {nat_count} invalid dates, removing them")
+            df = df.dropna(subset=['date'])
+        
+        if df.empty:
+            print(f"❌ No data after date processing")
+            return None
+        
         df = df.set_index('date')
         df = df.sort_index()
         
-        # Remove any remaining NaN values
+        print(f"🔍 DataFrame shape after date processing: {df.shape}")
+        print(f"🔍 Date range in data: {df.index[0]} to {df.index[-1]}")
+        
+        # Final cleaning
+        print(f"🔍 Final data cleaning...")
+        initial_count = len(df)
         df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
+        final_count = len(df)
+        
+        if final_count < initial_count:
+            print(f"🔍 Removed {initial_count - final_count} rows with NaN prices")
         
         if df.empty:
-            print(f"   ❌ No data after cleaning")
+            print(f"❌ No data after final cleaning")
             return None
         
-        print(f"   ✅ SUCCESS! Returning {len(df)} clean rows")
-        print(f"   📈 Price: {df['Close'].iloc[-1]:.4f}")
+        result_df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         
-        return df[['Open', 'High', 'Low', 'Close', 'Volume']]
+        print(f"✅ SUCCESS! Final result: {len(result_df)} rows")
+        print(f"📈 Price range: {result_df['Close'].min():.4f} - {result_df['Close'].max():.4f}")
+        print(f"📊 Latest price: {result_df['Close'].iloc[-1]:.4f}")
+        print(f"📅 Final date range: {result_df.index[0]} to {result_df.index[-1]}")
         
+        return result_df
+        
+    except requests.exceptions.Timeout:
+        print(f"❌ Request timeout after 30 seconds")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"❌ HTTP request failed: {type(e).__name__}: {e}")
+        return None
     except Exception as e:
-        print(f"   ❌ Error in fetch: {type(e).__name__}: {e}")
-        # Don't import traceback to avoid potential recursion
+        print(f"❌ Unexpected error: {type(e).__name__}: {e}")
         return None
 
 def create_features_for_prediction(data, feature_columns_list):
@@ -161,7 +255,7 @@ def create_features_for_prediction(data, feature_columns_list):
         print("   ❌ No input data for features")
         return pd.DataFrame()
 
-    print(f"   🔧 Creating features manually (no pandas-ta)")
+    print(f"   🔧 Creating features from {len(data)} rows of data")
     
     try:
         df = data.copy()
@@ -246,7 +340,7 @@ def get_model_prediction(data, model, scaler, feature_columns):
     if data is None or data.empty:
         return {"error": "No input data for prediction"}
     
-    print(f"   🤖 Generating prediction...")
+    print(f"   🤖 Generating prediction from {len(data)} data points...")
     
     try:
         features_df = create_features_for_prediction(data, feature_columns)
