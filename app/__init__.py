@@ -1,4 +1,4 @@
-# Updated app/__init__.py with enhanced debugging
+# Updated app/__init__.py with FMP-compatible asset configuration
 
 import os
 from flask import Flask
@@ -18,7 +18,7 @@ def create_app():
     ML_MODELS_FOLDER = os.path.join(PROJECT_ROOT, 'ml_models/')
 
     # --- ENHANCED DEBUGGING ---
-    print(f"\n=== DEBUGGING MODEL LOADING ===")
+    print(f"\n=== DEBUGGING MODEL LOADING (FMP VERSION) ===")
     print(f"APP_DIR: {APP_DIR}")
     print(f"PROJECT_ROOT: {PROJECT_ROOT}")
     print(f"ML_MODELS_FOLDER: {ML_MODELS_FOLDER}")
@@ -44,64 +44,63 @@ def create_app():
                 print(f"  📄 {item}")
     except Exception as e:
         print(f"❌ Error listing PROJECT_ROOT: {e}")
-    
-    # Alternative paths to check
-    alternative_paths = [
-        os.path.join(APP_DIR, 'ml_models'),
-        os.path.join(os.getcwd(), 'ml_models'),
-        './ml_models',
-        '/opt/render/project/src/ml_models',
-        os.path.join(os.path.dirname(__file__), '..', 'ml_models')
-    ]
-    
-    print(f"\n=== CHECKING ALTERNATIVE PATHS ===")
-    for alt_path in alternative_paths:
-        abs_path = os.path.abspath(alt_path)
-        exists = os.path.exists(abs_path)
-        print(f"Path: {alt_path}")
-        print(f"  Absolute: {abs_path}")
-        print(f"  Exists: {exists}")
-        if exists:
-            try:
-                contents = os.listdir(abs_path)
-                print(f"  Contents: {contents}")
-            except Exception as e:
-                print(f"  Error listing: {e}")
-        print()
 
+    # --- Updated Asset Classes for Financial Modeling Prep API ---
     app.config['ASSET_CLASSES'] = {
         "Forex": [
+            # Major Pairs - FMP supports these in XXX/YYY format
             "EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "AUDUSD=X", "USDCAD=X", "NZDUSD=X",
+            # Cross Pairs 
             "EURGBP=X", "EURJPY=X", "EURAUD=X", "EURCAD=X", "EURCHF=X",
             "GBPJPY=X", "AUDJPY=X", "CADJPY=X", "CHFJPY=X", "NZDJPY=X",
             "GBPAUD=X", "GBPCAD=X", "GBPCHF=X",
+            # Exotic Pairs (FMP has good coverage)
             "USDZAR=X", "USDMXN=X", "USDTRY=X", "USDSGD=X"
         ],
         "Crypto": [
+            # Major Cryptocurrencies - FMP format: XXXUSD
             "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "BNB-USD", "ADA-USD", "AVAX-USD",
             "DOGE-USD", "DOT-USD", "MATIC-USD", "SHIB-USD", "TRX-USD", "LTC-USD", "LINK-USD", "BCH-USD"
         ],
         "Stocks": [
+            # Large Cap Tech
             "AAPL", "GOOGL", "MSFT", "AMZN", "NVDA", "META", "TSLA", "AMD", "INTC", "CRM",
+            # Financial Sector
             "JPM", "BAC", "WFC", "GS", "MS", "V", "MA",
+            # Consumer & Retail
             "WMT", "COST", "HD", "NKE", "MCD", "KO",
+            # Healthcare
             "JNJ", "PFE", "MRNA", "UNH",
+            # Energy & Industrial
             "XOM", "CVX", "BA"
         ],
         "Indices": [
+            # US Indices - FMP uses ^ prefix
             "^GSPC", "^DJI", "^IXIC", "^RUT",
+            # International Indices
             "^FTSE", "^GDAXI", "^FCHI",
             "^N225", "^HSI",
+            # Volatility & Bonds
             "^VIX", "^TNX"
         ]
     }
 
+    # --- Timeframes supported by Financial Modeling Prep API ---
     app.config['TIMEFRAMES'] = {
-        "1 Hour": "1h",
-        "4 Hours": "4h",
-        "1 Day": "1d",
-        "1 Week": "1wk"
+        "1 Minute": "1m",      # FMP: 1min
+        "5 Minutes": "5m",     # FMP: 5min  
+        "15 Minutes": "15m",   # FMP: 15min
+        "30 Minutes": "30m",   # FMP: 30min
+        "1 Hour": "1h",        # FMP: 1hour
+        "4 Hours": "4h",       # FMP: 4hour
+        "1 Day": "1d",         # FMP: 1day
+        "1 Week": "1wk"        # FMP: 1week
     }
+
+    # --- FMP API Configuration ---
+    app.config['FMP_API_KEY'] = "3V5meXmuiupLM1fyL4vs6GeDB7RFA0LM"
+    app.config['FMP_BASE_URL'] = "https://financialmodelingprep.com/api/v3"
+    app.config['DATA_SOURCE'] = "Financial Modeling Prep API"
 
     # --- Load Model Artifacts with Enhanced Error Handling ---
     print("\n=== ATTEMPTING MODEL LOADING ===")
@@ -141,6 +140,7 @@ def create_app():
 
                 app.config['MODELS_LOADED'] = True
                 model_loaded = True
+                print(f"  🎉 Models successfully loaded for FMP API integration!")
                 break
                 
             except Exception as e:
@@ -181,6 +181,11 @@ def create_app():
                     print(f"  📄 {item}")
         except Exception as e:
             print(f"Error listing project root: {e}")
+    else:
+        print(f"\n✅ FMP API Integration Ready!")
+        print(f"   Data Source: {app.config['DATA_SOURCE']}")
+        print(f"   Supported Assets: {sum(len(assets) for assets in app.config['ASSET_CLASSES'].values())} symbols")
+        print(f"   Supported Timeframes: {len(app.config['TIMEFRAMES'])}")
     
     # Register routes
     with app.app_context():
