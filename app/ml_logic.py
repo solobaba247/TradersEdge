@@ -1,9 +1,10 @@
-# app/ml_logic.py - DIAGNOSTIC VERSION TO DEBUG FMP DATA ISSUES
+# app/ml_logic.py - COMPLETE FMP INTEGRATION
 
 import pandas as pd
 import numpy as np
 import requests
 import warnings
+import time
 from datetime import datetime, timedelta
 
 warnings.filterwarnings('ignore')
@@ -12,25 +13,105 @@ warnings.filterwarnings('ignore')
 FMP_API_KEY = "3V5meXmuiupLM1fyL4vs6GeDB7RFA0LM"
 FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
 
+class FMPRateLimiter:
+    """Rate limiter for FMP API to respect free tier limits"""
+    def __init__(self, requests_per_day=200, min_interval=0.6):
+        self.requests_per_day = requests_per_day  # Leave buffer from 250 limit
+        self.min_interval = min_interval  # 600ms between requests
+        self.requests_made = 0
+        self.last_reset = datetime.now().date()
+        self.last_request_time = 0
+    
+    def can_make_request(self):
+        """Check if we can make another request today"""
+        today = datetime.now().date()
+        if today > self.last_reset:
+            self.requests_made = 0
+            self.last_reset = today
+        
+        return self.requests_made < self.requests_per_day
+    
+    def wait_if_needed(self):
+        """Ensure minimum time between requests and track usage"""
+        if not self.can_make_request():
+            raise Exception("Daily API limit reached. Try again tomorrow.")
+        
+        current_time = time.time()
+        time_since_last = current_time - self.last_request_time
+        
+        if time_since_last < self.min_interval:
+            sleep_time = self.min_interval - time_since_last
+            time.sleep(sleep_time)
+        
+        self.last_request_time = time.time()
+        self.requests_made += 1
+        
+        print(f"🌐 API Request #{self.requests_made}/{self.requests_per_day} today")
+
+# Global rate limiter instance
+fmp_limiter = FMPRateLimiter()
+
+def convert_to_fmp_symbol(symbol):
+    """Convert various symbol formats to FMP API format."""
+    print(f"🔄 Converting symbol: {symbol}")
+    
+    # Forex pairs - FMP expects EURUSD format, not EUR/USD
+    if symbol.endswith('=X'):
+        base_quote = symbol.replace('=X', '')
+        if len(base_quote) == 6:
+            converted = base_quote  # EURUSD=X → EURUSD
+            print(f"   Forex: {symbol} → {converted}")
+            return converted
+    
+    # Crypto pairs - FMP expects BTCUSD format
+    elif '-USD' in symbol:
+        converted = symbol.replace('-USD', 'USD')  # BTC-USD → BTCUSD
+        print(f"   Crypto: {symbol} → {converted}")
+        return converted
+    
+    # Stock indices - FMP has specific formats
+    elif symbol.startswith('^'):
+        index_map = {
+            '^GSPC': 'SPX',    # S&P 500
+            '^DJI': 'DJI',     # Dow Jones
+            '^IXIC': 'IXIC',   # NASDAQ
+            '^RUT': 'RUT',     # Russell 2000
+            '^VIX': 'VIX',     # Volatility Index
+            '^TNX': 'TNX'      # 10-Year Treasury
+        }
+        converted = index_map.get(symbol, symbol[1:])
+        print(f"   Index: {symbol} → {converted}")
+        return converted
+    
+    # Regular stocks - no change needed
+    print(f"   Stock: {symbol} → {symbol} (no change)")
+    return symbol
+
 def calculate_rsi_manual(prices, window=14):
     """Calculate RSI manually without pandas-ta."""
     try:
         prices = pd.Series(prices)
         delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+        gain = (delta.where(delta > 0, 0)).rolling(window=window, min_periods=1).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=window, min_periods=1).mean()
+        
+        # Avoid division by zero
+        loss = loss.replace(0, 0.0001)
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         return rsi.fillna(50)
-    except:
+    except Exception as e:
+        print(f"   ⚠️ RSI calculation error: {e}")
         return pd.Series([50] * len(prices))
 
 def calculate_ema_manual(prices, window=200):
     """Calculate EMA manually without pandas-ta."""
     try:
         prices = pd.Series(prices)
-        return prices.ewm(span=window).mean()
-    except:
+        ema = prices.ewm(span=window, min_periods=1).mean()
+        return ema
+    except Exception as e:
+        print(f"   ⚠️ EMA calculation error: {e}")
         return pd.Series(prices)
 
 def calculate_atr_manual(high, low, close, window=14):
@@ -45,127 +126,103 @@ def calculate_atr_manual(high, low, close, window=14):
         tr3 = abs(low - close.shift())
         
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=window).mean()
+        atr = tr.rolling(window=window, min_periods=1).mean()
         return atr.fillna(1.0)
-    except:
+    except Exception as e:
+        print(f"   ⚠️ ATR calculation error: {e}")
         return pd.Series([1.0] * len(high))
 
-def fetch_yfinance_data(symbol, period='90d', interval='1h'):
+def fetch_fmp_data(symbol, period='90d', interval='1h'):
     """
-    DIAGNOSTIC VERSION - Enhanced logging to debug FMP data issues
+    Fetch data from Financial Modeling Prep API - COMPLETE IMPLEMENTATION
     """
-    print(f"🔍 === DIAGNOSTIC FMP FETCH for {symbol} ===")
-    print(f"🔍 Original request: period={period}, interval={interval}")
-    
-    # Convert symbol format
-    api_symbol = symbol
-    if symbol.endswith('=X'):
-        base_quote = symbol.replace('=X', '')
-        if len(base_quote) == 6:
-            api_symbol = f"{base_quote[:3]}/{base_quote[3:]}"
-    elif '-USD' in symbol:
-        api_symbol = symbol.replace('-USD', 'USD')
-    
-    print(f"🔍 Symbol conversion: {symbol} -> {api_symbol}")
-    
-    # Map intervals with more options
-    interval_map = {
-        '1m': '1min', '5m': '5min', '15m': '15min', '30m': '30min', 
-        '1h': '1hour', '4h': '4hour', '1d': '1day', '1wk': '1week'
-    }
-    fmp_interval = interval_map.get(interval, '1hour')
-    print(f"🔍 Interval mapping: {interval} -> {fmp_interval}")
-    
-    # Try different period strategies for more data
-    if period == '90d':
-        # For 90 days, try getting more data by extending the period
-        days = 180  # Get 6 months of data instead
-        print(f"🔍 Extended period: 90d -> 180 days for more data points")
-    else:
-        period_map = {'1d': 7, '5d': 14, '1mo': 60, '3mo': 120, '6mo': 240, 
-                      '1y': 365, '2y': 730}
-        days = period_map.get(period, 180)
-        print(f"🔍 Period mapping: {period} -> {days} days")
-    
-    # Date range calculation
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
-    from_date = start_date.strftime('%Y-%m-%d')
-    to_date = end_date.strftime('%Y-%m-%d')
-    
-    print(f"🔍 Date range: {from_date} to {to_date} ({days} days)")
-    
-    # Build API request
-    url = f"{FMP_BASE_URL}/historical-chart/{fmp_interval}/{api_symbol}"
-    params = {'from': from_date, 'to': to_date, 'apikey': FMP_API_KEY}
-    
-    print(f"🔍 Full URL: {url}")
-    print(f"🔍 Params: {params}")
+    print(f"🔍 === FMP FETCH for {symbol} ===")
+    print(f"🔍 Request: period={period}, interval={interval}")
     
     try:
-        print(f"🔍 Making HTTP request...")
+        # Rate limiting
+        fmp_limiter.wait_if_needed()
+        
+        # Convert symbol format
+        api_symbol = convert_to_fmp_symbol(symbol)
+        
+        # Map intervals to FMP format
+        interval_map = {
+            '1m': '1min', '5m': '5min', '15m': '15min', '30m': '30min', 
+            '1h': '1hour', '4h': '4hour', '1d': '1day', '1wk': '1week'
+        }
+        fmp_interval = interval_map.get(interval, '1hour')
+        print(f"🔍 Interval mapping: {interval} → {fmp_interval}")
+        
+        # Calculate date range with buffer for more data
+        period_days_map = {
+            '1d': 7, '5d': 14, '1mo': 60, '3mo': 120, 
+            '6mo': 240, '1y': 365, '2y': 730, '90d': 180
+        }
+        days = period_days_map.get(period, 180)
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+        from_date = start_date.strftime('%Y-%m-%d')
+        to_date = end_date.strftime('%Y-%m-%d')
+        
+        print(f"🔍 Date range: {from_date} to {to_date} ({days} days)")
+        
+        # Build API request
+        url = f"{FMP_BASE_URL}/historical-chart/{fmp_interval}/{api_symbol}"
+        params = {
+            'from': from_date, 
+            'to': to_date, 
+            'apikey': FMP_API_KEY
+        }
+        
+        print(f"🔍 API URL: {url}")
+        print(f"🔍 Params: from={from_date}, to={to_date}")
+        
+        # Make HTTP request
+        print(f"🌐 Making FMP API request...")
         response = requests.get(url, params=params, timeout=30)
         print(f"🔍 Response status: {response.status_code}")
-        print(f"🔍 Response headers: {dict(response.headers)}")
         
         if response.status_code != 200:
-            print(f"❌ HTTP Error {response.status_code}")
-            print(f"❌ Response text: {response.text}")
+            print(f"❌ HTTP Error {response.status_code}: {response.text}")
             return None
         
-        # Check response size
-        response_text = response.text
-        print(f"🔍 Response size: {len(response_text)} characters")
-        
+        # Parse JSON response
         try:
             data = response.json()
         except ValueError as e:
             print(f"❌ JSON parsing failed: {e}")
-            print(f"❌ Response preview: {response_text[:500]}...")
+            print(f"❌ Response preview: {response.text[:500]}...")
             return None
         
         print(f"🔍 JSON parsed successfully")
-        print(f"🔍 Response type: {type(data)}")
         
+        # Validate response
         if isinstance(data, dict):
-            print(f"🔍 Response is dict with keys: {list(data.keys())}")
-            # Check if it's an error response
             if 'error' in data or 'Error Message' in data:
                 print(f"❌ API Error: {data}")
                 return None
         
-        if not data:
-            print(f"❌ Empty response from FMP API")
-            return None
-        
-        if not isinstance(data, list):
-            print(f"❌ Expected list, got {type(data)}")
-            print(f"❌ Data content: {str(data)[:200]}...")
+        if not data or not isinstance(data, list):
+            print(f"❌ Invalid data format: expected list, got {type(data)}")
             return None
         
         print(f"🔍 Raw data points from FMP: {len(data)}")
         
-        # Show first few data points for debugging
-        if len(data) > 0:
-            print(f"🔍 First data point: {data[0]}")
-            if len(data) > 1:
-                print(f"🔍 Last data point: {data[-1]}")
-        
-        # Process data with detailed logging
-        print(f"🔍 Processing data points...")
+        # Process data points
         records = []
         for i, item in enumerate(data):
             try:
                 if not isinstance(item, dict):
-                    print(f"⚠️ Item {i} is not dict: {type(item)}")
                     continue
                 
+                # Validate required fields
                 required_fields = ['date', 'open', 'high', 'low', 'close']
-                missing_fields = [field for field in required_fields if field not in item]
-                if missing_fields:
-                    print(f"⚠️ Item {i} missing fields: {missing_fields}")
+                if not all(field in item for field in required_fields):
                     continue
                 
+                # Convert to standardized format
                 record = {
                     'date': item.get('date'),
                     'Open': float(item.get('open', 0)),
@@ -175,15 +232,13 @@ def fetch_yfinance_data(symbol, period='90d', interval='1h'):
                     'Volume': float(item.get('volume', 1000000))
                 }
                 
-                # Validate numeric values
+                # Validate prices are positive
                 if any(val <= 0 for val in [record['Open'], record['High'], record['Low'], record['Close']]):
-                    print(f"⚠️ Item {i} has invalid prices: {record}")
                     continue
                 
                 records.append(record)
                 
             except (ValueError, TypeError) as e:
-                print(f"⚠️ Error processing item {i}: {e}")
                 continue
         
         print(f"🔍 Valid records after processing: {len(records)}")
@@ -193,38 +248,22 @@ def fetch_yfinance_data(symbol, period='90d', interval='1h'):
             return None
         
         # Create DataFrame
-        print(f"🔍 Creating DataFrame...")
         df = pd.DataFrame(records)
-        print(f"🔍 DataFrame shape before date processing: {df.shape}")
         
-        # Process dates
-        print(f"🔍 Processing dates...")
+        # Process dates with UTC timezone
         df['date'] = pd.to_datetime(df['date'], utc=True, errors='coerce')
-        
-        # Check for NaT (Not a Time) values
-        nat_count = df['date'].isna().sum()
-        if nat_count > 0:
-            print(f"⚠️ Found {nat_count} invalid dates, removing them")
-            df = df.dropna(subset=['date'])
+        df = df.dropna(subset=['date'])
         
         if df.empty:
             print(f"❌ No data after date processing")
             return None
         
+        # Set index and sort
         df = df.set_index('date')
         df = df.sort_index()
         
-        print(f"🔍 DataFrame shape after date processing: {df.shape}")
-        print(f"🔍 Date range in data: {df.index[0]} to {df.index[-1]}")
-        
         # Final cleaning
-        print(f"🔍 Final data cleaning...")
-        initial_count = len(df)
         df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
-        final_count = len(df)
-        
-        if final_count < initial_count:
-            print(f"🔍 Removed {initial_count - final_count} rows with NaN prices")
         
         if df.empty:
             print(f"❌ No data after final cleaning")
@@ -235,7 +274,7 @@ def fetch_yfinance_data(symbol, period='90d', interval='1h'):
         print(f"✅ SUCCESS! Final result: {len(result_df)} rows")
         print(f"📈 Price range: {result_df['Close'].min():.4f} - {result_df['Close'].max():.4f}")
         print(f"📊 Latest price: {result_df['Close'].iloc[-1]:.4f}")
-        print(f"📅 Final date range: {result_df.index[0]} to {result_df.index[-1]}")
+        print(f"📅 Date range: {result_df.index[0]} to {result_df.index[-1]}")
         
         return result_df
         
@@ -317,7 +356,7 @@ def create_features_for_prediction(data, feature_columns_list):
             if col not in df.columns:
                 df[col] = 0.0
         
-        # Fill NaN values using simple methods to avoid recursion
+        # Fill NaN values using forward fill, then backward fill, then zero
         print(f"   🧹 Cleaning NaN values...")
         for col in df.columns:
             if df[col].dtype in ['float64', 'int64']:
@@ -391,6 +430,11 @@ def get_model_prediction(data, model, scaler, feature_columns):
         print(f"   ❌ Prediction error: {type(e).__name__}: {e}")
         return {"error": f"Prediction failed: {str(e)}"}
 
-# Backward compatibility
+# Backward compatibility aliases
 def fetch_data_via_proxies(symbol, period='90d', interval='1h'):
-    return fetch_yfinance_data(symbol, period, interval)
+    """Backward compatibility - redirects to FMP function"""
+    return fetch_fmp_data(symbol, period, interval)
+
+def fetch_yfinance_data(symbol, period='90d', interval='1h'):
+    """Backward compatibility - redirects to FMP function"""
+    return fetch_fmp_data(symbol, period, interval)
